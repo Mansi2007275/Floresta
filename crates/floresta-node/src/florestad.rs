@@ -500,9 +500,6 @@ impl Florestad {
             }
         }
 
-        // Electrum Server configuration.
-
-        // Instantiate the Electrum Server.
         let electrum_server = ElectrumServer::new(
             wallet,
             blockchain_state,
@@ -511,6 +508,47 @@ impl Florestad {
         )
         .map_err(FlorestadError::CouldNotCreateElectrumServer)?;
 
+        self.start_electrum(electrum_server, datadir).await?;
+
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+
+        let mut recv = self.stop_notify.lock().unwrap();
+        *recv = Some(receiver);
+
+        // Spawn the primary node task, which manages peer connections, chain synchronization,
+        // block processing and transaction relay.
+        task::spawn(chain_provider.run(sender));
+
+        // Metrics
+        #[cfg(feature = "metrics")]
+        {
+            let metrics_server_address =
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 3333);
+
+            task::spawn(floresta_metrics::metrics_server(metrics_server_address));
+            info!("Started metrics server on: {metrics_server_address}",);
+
+            // Periodically update memory usage
+            tokio::spawn(async {
+                let interval = Duration::from_secs(5);
+                let mut ticker = time::interval(interval);
+
+                loop {
+                    ticker.tick().await;
+                    floresta_metrics::get_metrics().update_memory_usage();
+                }
+            });
+        }
+
+        // All done, return Ok
+        Ok(())
+    }
+
+    async fn start_electrum(
+        &self,
+        electrum_server: ElectrumServer<ChainState<ChainStore>>,
+        datadir: &Path,
+    ) -> Result<(), FlorestadError> {
         // Default Electrum Server port.
         let default_electrum_port: u16 =
             Self::get_default_electrum_port(self.config.network, false);
@@ -610,37 +648,6 @@ impl Florestad {
         // Electrum Server's main loop.
         task::spawn(electrum_server.main_loop());
 
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-
-        let mut recv = self.stop_notify.lock().unwrap();
-        *recv = Some(receiver);
-
-        // Spawn the primary node task, which manages peer connections, chain synchronization,
-        // block processing and transaction relay.
-        task::spawn(chain_provider.run(sender));
-
-        // Metrics
-        #[cfg(feature = "metrics")]
-        {
-            let metrics_server_address =
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 3333);
-
-            task::spawn(floresta_metrics::metrics_server(metrics_server_address));
-            info!("Started metrics server on: {metrics_server_address}",);
-
-            // Periodically update memory usage
-            tokio::spawn(async {
-                let interval = Duration::from_secs(5);
-                let mut ticker = time::interval(interval);
-
-                loop {
-                    ticker.tick().await;
-                    floresta_metrics::get_metrics().update_memory_usage();
-                }
-            });
-        }
-
-        // All done, return Ok
         Ok(())
     }
 
